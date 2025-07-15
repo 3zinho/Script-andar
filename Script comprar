@@ -1,0 +1,257 @@
+-- Serverscript para sistema de bases dinâmicas
+local Players = game:GetService("Players")
+local ServerStorage = game:GetService("ServerStorage")
+local RunService = game:GetService("RunService")
+
+-- Configurações
+local BASE_PREFIX = "Base_"
+local BASE_CAPACITY = 3
+local NPC_WALK_SPEED = 16
+local BASE_CHECK_INTERVAL = 5
+local BASE_FOLLOW_OFFSET = Vector3.new(0, 0, -5) -- Distância da base em relação ao jogador
+
+-- Folders para organização
+local NPCFolder = Instance.new("Folder")
+NPCFolder.Name = "NPCs"
+NPCFolder.Parent = workspace
+
+local BaseFolder = Instance.new("Folder")
+BaseFolder.Name = "Bases"
+BaseFolder.Parent = workspace
+
+-- Tabela para rastrear jogadores e suas bases
+local playerBases = {}
+
+-- Função para criar uma nova base para um jogador
+local function createPlayerBase(player)
+    local character = player.Character or player.CharacterAdded:Wait()
+    local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+    
+    local basePart = Instance.new("Part")
+    basePart.Name = BASE_PREFIX .. player.Name
+    basePart.Size = Vector3.new(10, 1, 10)
+    basePart.Anchored = true
+    basePart.CanCollide = true
+    basePart.Color = Color3.fromRGB(0, 162, 255)
+    basePart.Transparency = 0.5
+    basePart.TopSurface = Enum.SurfaceType.Smooth
+    basePart.Parent = BaseFolder
+    
+    -- Cria spawn point para NPCs
+    local spawnPoint = Instance.new("Part")
+    spawnPoint.Name = "SpawnPoint"
+    spawnPoint.Size = Vector3.new(4, 1, 4)
+    spawnPoint.Anchored = true
+    spawnPoint.CanCollide = false
+    spawnPoint.Transparency = 1
+    spawnPoint.Position = humanoidRootPart.Position + Vector3.new(0, 5, 0)
+    spawnPoint.Parent = basePart
+    
+    -- Cria interface de informações
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "BaseInfo"
+    billboard.Size = UDim2.new(5, 0, 2, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = basePart
+    
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.Text = "Base de " .. player.Name .. "\n0/" .. BASE_CAPACITY
+    textLabel.TextColor3 = Color3.new(1, 1, 1)
+    textLabel.TextScaled = true
+    textLabel.BackgroundTransparency = 1
+    textLabel.Parent = billboard
+    
+    -- Adiciona a base ao registro do jogador
+    playerBases[player] = {
+        part = basePart,
+        spawnPoint = spawnPoint,
+        npcs = {},
+        capacity = BASE_CAPACITY,
+        player = player
+    }
+    
+    -- Conecta para mover a base junto com o jogador
+    local baseConnection
+    baseConnection = RunService.Heartbeat:Connect(function()
+        if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local hrp = player.Character.HumanoidRootPart
+            local targetPosition = hrp.Position + (hrp.CFrame.LookVector * BASE_FOLLOW_OFFSET.Z)
+            basePart.CFrame = CFrame.new(targetPosition) * CFrame.new(0, -2.5, 0)
+            spawnPoint.CFrame = basePart.CFrame * CFrame.new(0, 3, 0)
+        end
+    end)
+    
+    -- Limpa a conexão quando o jogador sai
+    player.CharacterRemoving:Connect(function()
+        if baseConnection then
+            baseConnection:Disconnect()
+        end
+    end)
+end
+
+-- Função para spawnar NPC
+local function spawnNPC()
+    local npc = ServerStorage.NPCTemplate:Clone()
+    npc.Name = "NPC_" .. os.time()
+    npc.Parent = NPCFolder
+    
+    local humanoid = npc:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.WalkSpeed = NPC_WALK_SPEED
+    end
+    
+    return npc
+end
+
+-- Função para encontrar a melhor base para um NPC
+local function findBestBaseForNPC(npc)
+    -- Primeiro tenta encontrar uma base com vaga na base do jogador mais próximo
+    local closestPlayer, minDistance = nil, math.huge
+    local npcPosition = npc:GetPivot().Position
+    
+    for player, baseData in pairs(playerBases) do
+        if player.Character and #baseData.npcs < baseData.capacity then
+            local distance = (player.Character.HumanoidRootPart.Position - npcPosition).Magnitude
+            if distance < minDistance then
+                closestPlayer = player
+                minDistance = distance
+            end
+        end
+    end
+    
+    if closestPlayer then
+        return playerBases[closestPlayer]
+    end
+    
+    -- Se nenhuma base tem vaga, tenta realocar NPCs
+    for player, baseData in pairs(playerBases) do
+        if #baseData.npcs > 0 then
+            return baseData
+        end
+    end
+    
+    return nil
+end
+
+-- Função para mover NPC para a base
+local function moveNPCToBase(npc, base)
+    local humanoid = npc:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    -- Adiciona à lista de NPCs da base
+    table.insert(base.npcs, npc)
+    
+    -- Atualiza a interface
+    local textLabel = base.part:FindFirstChild("BaseInfo"):FindFirstChildOfClass("TextLabel")
+    if textLabel then
+        textLabel.Text = "Base de " .. base.player.Name .. "\n" .. #base.npcs .. "/" .. base.capacity
+    end
+    
+    -- Faz o NPC se mover para a base
+    local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+    local basePart = base.spawnPoint
+    
+    if npcRoot and basePart then
+        -- Define um ponto na área da base (não exatamente no centro)
+        local targetPosition = basePart.Position + Vector3.new(
+            math.random(-base.part.Size.X/2.5, base.part.Size.X/2.5),
+            0,
+            math.random(-base.part.Size.Z/2.5, base.part.Size.Z/2.5)
+        )
+        
+        humanoid:MoveTo(targetPosition)
+        
+        -- Conecta o evento de chegada
+        local connection
+        connection = humanoid.MoveToFinished:Connect(function(reached)
+            if reached then
+                if connection then connection:Disconnect() end
+                -- Faz o NPC ficar na base
+                if humanoid then
+                    humanoid.WalkSpeed = 0
+                end
+                -- Pode adicionar animação de idle aqui
+            end
+        end)
+    end
+end
+
+-- Função principal do comportamento do NPC
+local function npcBehavior(npc)
+    -- Tempo de "compra" aleatório
+    task.wait(math.random(3, 8))
+    
+    -- Encontra a melhor base disponível
+    local targetBase = findBestBaseForNPC(npc)
+    
+    if targetBase then
+        -- Se a base está cheia, tenta realocar um NPC existente
+        if #targetBase.npcs >= targetBase.capacity then
+            local npcToReallocate = table.remove(targetBase.npcs, 1)
+            if npcToReallocate and npcToReallocate.Parent then
+                local newBase = findBestBaseForNPC(npcToReallocate)
+                if newBase then
+                    moveNPCToBase(npcToReallocate, newBase)
+                end
+            end
+        end
+        
+        -- Move o novo NPC para a base
+        moveNPCToBase(npc, targetBase)
+    else
+        -- Se não encontrou base, destrói o NPC após um tempo
+        task.wait(10)
+        if npc and npc.Parent then
+            npc:Destroy()
+        end
+    end
+end
+
+-- Função para spawnar NPCs periodicamente
+local function startNPCSpawner()
+    while true do
+        task.wait(math.random(5, 15))
+        
+        -- Spawna um NPC para cada jogador online
+        for _, player in ipairs(Players:GetPlayers()) do
+            if playerBases[player] then
+                local npc = spawnNPC()
+                if npc then
+                    -- Posiciona o NPC em um local aleatório próximo
+                    if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                        local spawnPos = player.Character.HumanoidRootPart.Position + 
+                                         Vector3.new(math.random(-15, 15), 0, math.random(-15, 15))
+                        npc:PivotTo(CFrame.new(spawnPos))
+                    end
+                    
+                    -- Inicia o comportamento do NPC em uma nova thread
+                    coroutine.wrap(npcBehavior)(npc)
+                end
+            end
+        end
+    end
+end
+
+-- Inicializa o sistema quando um jogador entra
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function()
+        createPlayerBase(player)
+    end)
+    
+    -- Se o jogador já tem um personagem (quando o script começa)
+    if player.Character then
+        createPlayerBase(player)
+    end
+end)
+
+-- Remove a base quando o jogador sai
+Players.PlayerRemoving:Connect(function(player)
+    if playerBases[player] then
+        playerBases[player].part:Destroy()
+        playerBases[player] = nil
+    end
+end)
+
+-- Inicia o spawner de NPCs
+coroutine.wrap(startNPCSpawner)()
